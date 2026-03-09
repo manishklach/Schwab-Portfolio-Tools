@@ -1,0 +1,7 @@
+# Privacy / local data
+my_holdings.csv
+*.csv
+*.xlsx
+
+# Keep code and docs shareable
+!README.md
