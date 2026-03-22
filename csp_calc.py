@@ -1,3 +1,5 @@
+"""Estimate uncovered short put exposure and cash-secured capital required from a Schwab holdings export."""
+
 import argparse
 
 import pandas as pd

@@ -1,3 +1,5 @@
+"""Estimate approximate option portfolio sensitivity to implied-volatility crush scenarios."""
+
 import argparse
 import math
 from dataclasses import dataclass

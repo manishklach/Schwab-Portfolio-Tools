@@ -1,3 +1,5 @@
+"""Shared Schwab portfolio parsing and normalization helpers used by the reporting scripts."""
+
 from __future__ import annotations
 
 import re

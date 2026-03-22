@@ -1,3 +1,5 @@
+"""Identify call debit spreads in a Schwab holdings export and remove their day-change contribution."""
+
 import argparse
 from collections import deque
 

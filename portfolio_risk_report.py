@@ -1,3 +1,5 @@
+"""Generate a consolidated portfolio summary with approximate option Greeks and stress scenarios."""
+
 import argparse
 from datetime import datetime
 
