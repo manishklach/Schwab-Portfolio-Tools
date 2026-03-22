@@ -1,6 +1,7 @@
 """Generate a consolidated portfolio summary with approximate option Greeks and stress scenarios."""
 
 import argparse
+from collections import defaultdict
 from datetime import datetime
 
 import numpy as np
@@ -79,6 +80,120 @@ def build_option_risk_frame(df: pd.DataFrame, risk_free_rate: float) -> pd.DataF
     return options
 
 
+def summarize_call_debit_spreads(options: pd.DataFrame) -> pd.DataFrame:
+    spread_rows = []
+    calls = options[options["Opt Type"] == "C"].copy()
+
+    for (underlying, expiry), grp in calls.groupby(["Underlying", "Expiration"]):
+        longs = []
+        shorts = []
+        for _, row in grp.sort_values("Strike Price").iterrows():
+            qty = float(row["Qty"])
+            leg = {
+                "strike": float(row["Strike Price"]),
+                "qty": abs(qty),
+                "price": float(row["Price Numeric"]),
+                "delta": float(row["Delta Dollars"]),
+            }
+            if qty > 0:
+                longs.append(leg)
+            elif qty < 0:
+                shorts.append(leg)
+
+        for short_leg in sorted(shorts, key=lambda leg: leg["strike"]):
+            remaining = short_leg["qty"]
+            candidates = [leg for leg in longs if leg["qty"] > 0 and leg["strike"] < short_leg["strike"]]
+            candidates.sort(key=lambda leg: leg["strike"], reverse=True)
+
+            for long_leg in candidates:
+                if remaining <= 0:
+                    break
+                matched = min(remaining, long_leg["qty"])
+                width = short_leg["strike"] - long_leg["strike"]
+                spread_rows.append(
+                    {
+                        "Underlying": underlying,
+                        "Expiration": expiry,
+                        "Contracts": matched,
+                        "Long Strike": long_leg["strike"],
+                        "Short Strike": short_leg["strike"],
+                        "Width": width,
+                        "Max Spread Value": matched * 100.0 * width,
+                        "Net Delta Dollars": matched
+                        * (
+                            long_leg["delta"] / max(long_leg["qty"], 1.0)
+                            + short_leg["delta"] / max(short_leg["qty"], 1.0)
+                        ),
+                    }
+                )
+                remaining -= matched
+                long_leg["qty"] -= matched
+
+    if not spread_rows:
+        return pd.DataFrame(
+            columns=[
+                "Underlying",
+                "Contracts",
+                "Max Spread Value",
+                "Net Delta Dollars",
+            ]
+        )
+
+    return (
+        pd.DataFrame(spread_rows)
+        .groupby("Underlying", as_index=False)[["Contracts", "Max Spread Value", "Net Delta Dollars"]]
+        .sum()
+        .sort_values("Max Spread Value", ascending=False)
+    )
+
+
+def summarize_uncovered_short_puts(options: pd.DataFrame) -> pd.DataFrame:
+    puts = options[options["Opt Type"] == "P"].copy()
+    uncovered_rows = []
+
+    for (underlying, expiry), grp in puts.groupby(["Underlying", "Expiration"]):
+        longs = []
+        shorts = []
+        for _, row in grp.sort_values("Strike Price", ascending=False).iterrows():
+            qty = float(row["Qty"])
+            if qty > 0:
+                longs.append({"strike": float(row["Strike Price"]), "qty": qty})
+            elif qty < 0:
+                shorts.append(row)
+
+        for short_row in shorts:
+            remaining = abs(float(short_row["Qty"]))
+            short_strike = float(short_row["Strike Price"])
+            candidates = [leg for leg in longs if leg["qty"] > 0 and leg["strike"] < short_strike]
+            candidates.sort(key=lambda leg: leg["strike"], reverse=True)
+
+            for long_leg in candidates:
+                if remaining <= 0:
+                    break
+                matched = min(remaining, long_leg["qty"])
+                remaining -= matched
+                long_leg["qty"] -= matched
+
+            if remaining > 0:
+                uncovered_rows.append(
+                    {
+                        "Underlying": underlying,
+                        "Contracts": remaining,
+                        "Assignment Notional": remaining * 100.0 * short_strike,
+                    }
+                )
+
+    if not uncovered_rows:
+        return pd.DataFrame(columns=["Underlying", "Contracts", "Assignment Notional"])
+
+    return (
+        pd.DataFrame(uncovered_rows)
+        .groupby("Underlying", as_index=False)[["Contracts", "Assignment Notional"]]
+        .sum()
+        .sort_values("Assignment Notional", ascending=False)
+    )
+
+
 def print_section(title: str):
     print(f"\n{title}")
     print("-" * len(title))
@@ -96,6 +211,8 @@ def main():
     df = load_schwab_holdings(csv_path, as_of=as_of)
     df["Equity Equivalent Exposure"] = estimate_equity_equivalent_exposure(df)
     options = build_option_risk_frame(df, args.r)
+    call_spreads = summarize_call_debit_spreads(options) if not options.empty else pd.DataFrame()
+    uncovered_puts = summarize_uncovered_short_puts(options) if not options.empty else pd.DataFrame()
 
     nav = df["Market Value Numeric"].sum()
     long_mv = df.loc[df["Market Value Numeric"] > 0, "Market Value Numeric"].sum()
@@ -126,15 +243,39 @@ def main():
         label = asset_type if str(asset_type).strip() else "Unknown"
         print(f"{label}: ${value:,.2f}")
 
-    print_section("Largest Underlying Exposures")
-    underlying_exposure = (
-        df.groupby("Underlying", dropna=False)["Equity Equivalent Exposure"]
-        .sum()
-        .sort_values(key=lambda s: s.abs(), ascending=False)
-        .head(15)
-    )
-    for underlying, value in underlying_exposure.items():
-        print(f"{underlying}: ${value:,.2f}")
+    print_section("Net Delta Exposure By Underlying")
+    if options.empty:
+        print("No active option positions found.")
+    else:
+        delta_exposure = (
+            options.groupby("Underlying")["Delta Dollars"]
+            .sum()
+            .sort_values(key=lambda s: s.abs(), ascending=False)
+            .head(15)
+        )
+        for underlying, value in delta_exposure.items():
+            print(f"{underlying}: ${value:,.2f}")
+
+    print_section("Bullish Call Debit Spreads")
+    if call_spreads.empty:
+        print("No call debit spreads recognized.")
+    else:
+        for _, row in call_spreads.head(15).iterrows():
+            print(
+                f"{row['Underlying']}: {row['Contracts']:g} contracts | "
+                f"max spread value ${row['Max Spread Value']:,.2f} | "
+                f"net delta ${row['Net Delta Dollars']:,.2f}"
+            )
+
+    print_section("Uncovered Short Puts")
+    if uncovered_puts.empty:
+        print("No uncovered short puts recognized.")
+    else:
+        for _, row in uncovered_puts.head(15).iterrows():
+            print(
+                f"{row['Underlying']}: {row['Contracts']:g} contracts | "
+                f"assignment notional ${row['Assignment Notional']:,.2f}"
+            )
 
     print_section("Option Risk")
     if options.empty:
