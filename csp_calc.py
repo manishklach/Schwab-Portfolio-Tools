@@ -1,27 +1,8 @@
 import argparse
-from pathlib import Path
-import re
 
 import pandas as pd
 
-
-def clean_numeric(val):
-    if pd.isna(val) or str(val).strip() in ['N/A', '-', '']:
-        return 0.0
-    val_str = str(val).replace('$', '').replace('%', '').replace(',', '')
-    if '(' in val_str:
-        val_str = '-' + val_str.replace('(', '').replace(')', '')
-    try:
-        return float(val_str)
-    except ValueError:
-        return 0.0
-
-
-def extract_details(symbol):
-    match = re.match(r'^\s*(\S+)\s+(\d{2}/\d{2}/\d{4})\s+([0-9]+(?:\.[0-9]+)?)\s+([CP])\s*$', str(symbol))
-    if match:
-        return pd.Series([match.group(1), match.group(2), float(match.group(3)), match.group(4)])
-    return pd.Series(['', '', 0.0, ''])
+from portfolio_core import active_option_positions, clean_numeric, default_csv_path, load_schwab_holdings
 
 
 def find_uncovered_short_puts(df_puts):
@@ -75,22 +56,16 @@ def main():
     parser.add_argument('--output', default=None, help='Output Excel path (default: naked_short_puts.xlsx next to script)')
     args = parser.parse_args()
 
-    script_dir = Path(__file__).parent
-    csv_path = Path(args.file) if args.file else script_dir / 'my_holdings.csv'
-    output_path = Path(args.output) if args.output else script_dir / 'naked_short_puts.xlsx'
+    csv_path = default_csv_path(args.file, __file__)
+    output_path = (
+        default_csv_path(args.output, __file__).with_name('naked_short_puts.xlsx')
+        if args.output is None
+        else default_csv_path(args.output, __file__)
+    )
 
-    df = pd.read_csv(csv_path, skiprows=2)
-    df = df[~df['Symbol'].isin(['Account Total', 'Cash & Cash Investments'])].copy()
-
-    asset_type_col = 'Security Type' if 'Security Type' in df.columns else 'Asset Type'
-    if asset_type_col not in df.columns:
-        raise KeyError("Could not find asset type column. Expected 'Security Type' or 'Asset Type'.")
-
-    df['Qty'] = df['Qty (Quantity)'].apply(clean_numeric)
-
-    df_options = df[df[asset_type_col] == 'Option'].copy()
-    df_options[['Ticker', 'Expiration', 'Strike Price', 'Opt Type']] = df_options['Symbol'].apply(extract_details)
-
+    df = load_schwab_holdings(csv_path)
+    df_options = active_option_positions(df)
+    df_options['Ticker'] = df_options['Underlying']
     df_puts = df_options[df_options['Opt Type'] == 'P'].copy()
     df_naked_short_puts = find_uncovered_short_puts(df_puts)
 

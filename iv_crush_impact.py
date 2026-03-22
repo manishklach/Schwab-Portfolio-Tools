@@ -1,15 +1,12 @@
 import argparse
 import math
-import re
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-
-SYMBOL_RE = re.compile(r'^\s*(\S+)\s+(\d{2}/\d{2}/\d{4})\s+([0-9]+(?:\.[0-9]+)?)\s+([CP])\s*$')
+from portfolio_core import active_option_positions, default_csv_path, load_schwab_holdings
 
 
 @dataclass
@@ -23,27 +20,6 @@ def norm_cdf(x):
     x_arr = np.asarray(x, dtype=float)
     erf_vec = np.vectorize(math.erf)
     return 0.5 * (1.0 + erf_vec(x_arr / np.sqrt(2.0)))
-
-
-def clean_numeric(val):
-    if pd.isna(val) or str(val).strip() in {'N/A', '-', ''}:
-        return 0.0
-    val_str = str(val).replace('$', '').replace('%', '').replace(',', '').strip()
-    if '(' in val_str and ')' in val_str:
-        val_str = '-' + val_str.replace('(', '').replace(')', '')
-    try:
-        return float(val_str)
-    except ValueError:
-        return 0.0
-
-
-def parse_symbol(symbol):
-    match = SYMBOL_RE.match(str(symbol))
-    if not match:
-        return None
-    ticker, expiry, strike, opt_type = match.groups()
-    return ticker, expiry, float(strike), opt_type
-
 
 def bs_price_vec(spot, strike, t, r, sigma, opt_type_arr):
     spot = np.maximum(spot, 1e-9)
@@ -168,28 +144,15 @@ def main():
     )
     args = parser.parse_args()
 
-    script_dir = Path(__file__).parent
-    csv_path = Path(args.file) if args.file else script_dir / 'my_holdings.csv'
+    as_of = datetime.strptime(args.as_of, '%Y-%m-%d').date() if args.as_of else datetime.now().date()
+    csv_path = default_csv_path(args.file, __file__)
 
-    df = pd.read_csv(csv_path, skiprows=2)
-    df = df[~df['Symbol'].isin(['Account Total', 'Cash & Cash Investments'])].copy()
-
-    asset_type_col = 'Security Type' if 'Security Type' in df.columns else 'Asset Type'
-    if asset_type_col not in df.columns:
-        raise KeyError("Could not find asset type column. Expected 'Security Type' or 'Asset Type'.")
-
-    df = df[df[asset_type_col] == 'Option'].copy()
-    parsed = df['Symbol'].apply(parse_symbol)
-    df = df[parsed.notna()].copy()
-
-    parsed_df = pd.DataFrame(parsed[parsed.notna()].tolist(), columns=['Ticker', 'Expiration', 'Strike Price', 'Opt Type'], index=df.index)
-    df = pd.concat([df, parsed_df], axis=1)
-
-    df['Qty'] = df['Qty (Quantity)'].apply(clean_numeric)
-    df['Option Price'] = df['Price'].apply(clean_numeric)
+    df = load_schwab_holdings(csv_path, as_of=as_of)
+    df = active_option_positions(df)
+    df['Ticker'] = df['Underlying']
+    df['Option Price'] = df['Price Numeric']
     df = df[(df['Qty'] != 0) & (df['Option Price'] > 0)].copy()
 
-    as_of = datetime.strptime(args.as_of, '%Y-%m-%d').date() if args.as_of else datetime.now().date()
     df['Expiry Date'] = pd.to_datetime(df['Expiration'], format='%m/%d/%Y', errors='coerce').dt.date
     df = df[df['Expiry Date'].notna()].copy()
     df['Days'] = (df['Expiry Date'] - as_of).apply(lambda d: d.days if pd.notna(d) else -1)

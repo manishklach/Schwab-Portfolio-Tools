@@ -39,6 +39,7 @@ TSLA 04/17/2026 250 P
 - `day_change_call_spreads.py`: Identifies call debit spreads and removes their day-change contribution from the portfolio total.
 - `csp_calc.py`: Finds uncovered short puts and estimates cash-secured capital required.
 - `iv_crush_impact.py`: Estimates option portfolio sensitivity to implied-volatility drops.
+- `portfolio_risk_report.py`: Produces a consolidated portfolio summary, approximate option Greeks, and stress scenarios.
 
 ## Requirements
 
@@ -173,6 +174,27 @@ What it does:
   - VIX down 20%
 - separates puts from matched call debit spreads
 
+### 5. Portfolio summary and risk report
+
+```powershell
+python .\portfolio_risk_report.py
+```
+
+Use a custom input file and valuation date:
+
+```powershell
+python .\portfolio_risk_report.py --file .\my_holdings.csv --as-of 2026-03-22
+```
+
+What it does:
+
+- loads the Schwab CSV into a shared normalized position frame
+- excludes expired options from option-risk calculations
+- reports NAV, day change, and asset-type mix
+- estimates equity-equivalent exposure by underlying
+- computes approximate delta, gamma, and vega for active option positions
+- runs simple spot/vol stress scenarios
+
 ## Notes on the recent fixes
 
 The current scripts include a few important corrections:
@@ -180,6 +202,9 @@ The current scripts include a few important corrections:
 - `csp_calc.py` now handles partial hedges correctly and does not mark all short puts as covered just because a single long put exists at the same expiration.
 - `iv_crush_impact.py` now matches only valid call debit spreads with long-lower and short-higher strikes.
 - `day_change_call_spreads.py` and `csp_calc.py` now use normal command-line entrypoints and stricter argument parsing.
+- `portfolio_day_change.py` now parses parenthesized negative dollar values correctly.
+- `iv_crush_impact.py`, `day_change_call_spreads.py`, and `csp_calc.py` now exclude expired option rows from option-risk logic.
+- the CSV-backed scripts now share common Schwab parsing and option normalization logic via `portfolio_core.py`.
 
 ## Safe sharing checklist
 

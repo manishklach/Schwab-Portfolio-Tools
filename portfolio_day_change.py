@@ -10,6 +10,8 @@ import sys
 from collections import defaultdict
 from typing import Iterable
 
+from portfolio_core import clean_numeric
+
 
 DAY_CHANGE_HEADER = "Day Chng $ (Day Change $)"
 DAY_CHANGE_HEADER_NORMALIZED = "day chng $ (day change $)"
@@ -34,11 +36,10 @@ def normalize_money(value: str) -> float | None:
     cleaned = value.strip()
     if not cleaned or cleaned.upper() == "N/A":
         return None
-    cleaned = cleaned.replace(",", "").replace("$", "")
-    try:
-        return float(cleaned)
-    except ValueError:
+    parsed = clean_numeric(cleaned)
+    if parsed == 0.0 and cleaned not in {"0", "0.0", "$0", "$0.00", "($0.00)", "-0", "-0.0"}:
         return None
+    return parsed
 
 
 def split_row(line: str, delimiter: str) -> list[str]:

@@ -1,12 +1,9 @@
 import argparse
 from collections import deque
-from pathlib import Path
-import re
 
 import pandas as pd
 
-
-SYMBOL_RE = re.compile(r'^\s*(\S+)\s+(\d{2}/\d{2}/\d{4})\s+([0-9]+(?:\.[0-9]+)?)\s+([CP])\s*$')
+from portfolio_core import active_option_positions, default_csv_path, load_schwab_holdings
 
 
 class Dinic:
@@ -61,26 +58,6 @@ class Dinic:
                     break
                 flow += pushed
         return flow
-
-
-def clean_numeric(val):
-    if pd.isna(val) or str(val).strip() in ['N/A', '-', '']:
-        return 0.0
-    val_str = str(val).replace('$', '').replace('%', '').replace(',', '')
-    if '(' in val_str:
-        val_str = '-' + val_str.replace('(', '').replace(')', '')
-    try:
-        return float(val_str)
-    except ValueError:
-        return 0.0
-
-
-def extract_details(symbol):
-    match = SYMBOL_RE.match(str(symbol))
-    if match:
-        return pd.Series([match.group(1), match.group(2), float(match.group(3)), match.group(4)])
-    return pd.Series(['', '', 0.0, ''])
-
 
 def optimize_call_spreads(group):
     longs_df = group[group['Qty'] > 0].copy().reset_index(drop=True)
@@ -153,19 +130,12 @@ def main():
     parser.add_argument('--file', default=None, help='Path to holdings CSV (default: my_holdings.csv next to script)')
     args = parser.parse_args()
 
-    csv_path = Path(args.file) if args.file else Path(__file__).with_name('my_holdings.csv')
-    df = pd.read_csv(csv_path, skiprows=2)
-    df = df[~df['Symbol'].isin(['Account Total', 'Cash & Cash Investments'])].copy()
+    csv_path = default_csv_path(args.file, __file__)
+    df = load_schwab_holdings(csv_path)
+    df['Day Chng $'] = df['Day Change Numeric']
 
-    asset_type_col = 'Security Type' if 'Security Type' in df.columns else 'Asset Type'
-    if asset_type_col not in df.columns:
-        raise KeyError("Could not find asset type column. Expected 'Security Type' or 'Asset Type'.")
-
-    df['Qty'] = df['Qty (Quantity)'].apply(clean_numeric)
-    df['Day Chng $'] = df['Day Chng $ (Day Change $)'].apply(clean_numeric)
-
-    df_options = df[df[asset_type_col] == 'Option'].copy()
-    df_options[['Ticker', 'Expiration', 'Strike Price', 'Opt Type']] = df_options['Symbol'].apply(extract_details)
+    df_options = active_option_positions(df)
+    df_options['Ticker'] = df_options['Underlying']
     df_calls = df_options[df_options['Opt Type'] == 'C'].copy()
 
     spreads_found = []
