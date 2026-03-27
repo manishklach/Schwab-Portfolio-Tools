@@ -106,6 +106,15 @@ def normalize_ticker(ticker: str, use_underlying: bool) -> str:
     return cleaned.split()[0]
 
 
+def should_exclude_ticker(ticker: str, normalized: str) -> bool:
+    excluded_values = {ticker, normalized}
+    if excluded_values & EXCLUDED_TICKERS:
+        return True
+
+    lowered = {value.lower() for value in excluded_values if value}
+    return any(value.startswith("positions") for value in lowered)
+
+
 def aggregate_day_change(
     rows: list[dict[str, str]],
     symbol_key: str,
@@ -116,7 +125,7 @@ def aggregate_day_change(
     for row in rows:
         ticker = row.get(symbol_key, "").strip()
         normalized = normalize_ticker(ticker, use_underlying)
-        if not ticker or ticker in EXCLUDED_TICKERS or normalized in EXCLUDED_TICKERS:
+        if not ticker or should_exclude_ticker(ticker, normalized):
             continue
         day_change = normalize_money(row.get(day_change_key, ""))
         if day_change is None:
