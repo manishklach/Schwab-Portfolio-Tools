@@ -4,6 +4,7 @@ import argparse
 from collections import deque
 
 import pandas as pd
+import yfinance as yf
 
 from portfolio_core import active_option_positions, default_csv_path, load_schwab_holdings
 
@@ -89,7 +90,7 @@ def optimize_call_spreads(group):
         for si in range(S):
             short_strike = float(shorts_df.loc[si, 'Strike Price'])
             width = short_strike - long_strike
-            if long_strike < short_strike and width <= 10.0:
+            if long_strike < short_strike:
                 u = long_base + li
                 v = short_base + si
                 edge_idx = len(dinic.adj[u])
@@ -150,6 +151,22 @@ def main():
     else:
         target_spreads = df_spreads.copy()
 
+    tickers = target_spreads["Ticker"].unique()
+    stock_prices = {}
+    for ticker in tickers:
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="1d")
+            if not hist.empty:
+                stock_prices[ticker] = float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+
+    stock_col = target_spreads["Ticker"].map(stock_prices)
+    deep_itm = stock_col.notna() & (stock_col > target_spreads["Long Strike"]) & (stock_col > target_spreads["Short Strike"])
+    total_spreads = len(target_spreads)
+    target_spreads = target_spreads[deep_itm].copy()
+
     spread_day_chng_to_remove = 0.0
     for _, row in target_spreads.iterrows():
         spread_day_chng_to_remove += (row['Matched Qty'] * row['Long Day Chng / Ctr'])
@@ -159,7 +176,7 @@ def main():
     filtered_day_change = original_day_change - spread_day_chng_to_remove
 
     print('--- SPREAD FILTERING ---')
-    print(f'Identified {len(target_spreads)} optimized Call Debit Spread pairings ($10 or less width).')
+    print(f'Identified {total_spreads} call debit spreads, {len(target_spreads)} deep ITM (stock > both strikes).')
 
     if args.verbose:
         print('\n--- ELIMINATED SPREADS (VERBOSE) ---')

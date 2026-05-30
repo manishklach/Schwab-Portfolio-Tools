@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 
-EXCLUDED_SYMBOLS = {"Account Total", "Cash & Cash Investments"}
+EXCLUDED_SYMBOLS = {"Account Total", "Cash & Cash Investments", "Positions Total"}
 OPTION_SYMBOL_RE = re.compile(
     r"^\s*(\S+)\s+(\d{2}/\d{2}/\d{4})\s+([0-9]+(?:\.[0-9]+)?)\s+([CP])\s*$"
 )

@@ -1,11 +1,11 @@
 """Generate a consolidated portfolio summary with approximate option Greeks and stress scenarios."""
 
 import argparse
-from collections import defaultdict
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 from portfolio_core import (
     active_option_positions,
@@ -46,6 +46,22 @@ def bs_vega_vec(spot, strike, t, r, sigma):
     return np.asarray(spot, dtype=float) * pdf_d1 * np.sqrt(np.maximum(np.asarray(t, dtype=float), 1e-9))
 
 
+def bs_theta_vec(spot, strike, t, r, sigma, opt_type):
+    d1 = bs_d1(spot, strike, t, r, sigma)
+    d2 = d1 - np.maximum(np.asarray(sigma, dtype=float), 1e-6) * np.sqrt(np.maximum(np.asarray(t, dtype=float), 1e-9))
+    pdf_d1 = (1.0 / np.sqrt(2.0 * np.pi)) * np.exp(-0.5 * d1**2)
+    carry = r * np.asarray(strike, dtype=float) * np.exp(-r * np.maximum(np.asarray(t, dtype=float), 1e-9))
+    call_theta = (
+        -np.asarray(spot, dtype=float) * pdf_d1 * np.asarray(sigma, dtype=float) / (2.0 * np.sqrt(np.maximum(np.asarray(t, dtype=float), 1e-9)))
+        - carry * norm_cdf(d2)
+    )
+    put_theta = (
+        -np.asarray(spot, dtype=float) * pdf_d1 * np.asarray(sigma, dtype=float) / (2.0 * np.sqrt(np.maximum(np.asarray(t, dtype=float), 1e-9)))
+        + carry * norm_cdf(-d2)
+    )
+    return np.where(np.asarray(opt_type) == "C", call_theta, put_theta)
+
+
 def build_option_risk_frame(df: pd.DataFrame, risk_free_rate: float) -> pd.DataFrame:
     options = active_option_positions(df)
     if options.empty:
@@ -74,9 +90,11 @@ def build_option_risk_frame(df: pd.DataFrame, risk_free_rate: float) -> pd.DataF
     options["Delta"] = bs_delta_vec(spot, strike, t, risk_free_rate, sigma, opt_type)
     options["Gamma"] = bs_gamma_vec(spot, strike, t, risk_free_rate, sigma)
     options["Vega"] = bs_vega_vec(spot, strike, t, risk_free_rate, sigma)
+    options["Theta"] = bs_theta_vec(spot, strike, t, risk_free_rate, sigma, opt_type)
     options["Delta Dollars"] = options["Qty"] * options["Multiplier"] * options["Delta"] * options["Spot Proxy"]
     options["Gamma Dollars 1%"] = options["Qty"] * options["Multiplier"] * options["Gamma"] * (options["Spot Proxy"] * 0.01) ** 2
     options["Vega Dollars 1 Vol"] = options["Qty"] * options["Multiplier"] * options["Vega"] * 0.01
+    options["Theta Dollars 1 Day"] = options["Qty"] * options["Multiplier"] * options["Theta"] / 365.0
     return options
 
 
@@ -199,6 +217,48 @@ def print_section(title: str):
     print("-" * len(title))
 
 
+def print_scenario_line(label: str, pnl: float, nav: float):
+    pct_nav = (pnl / nav * 100.0) if nav else 0.0
+    print(f"{label}: ${pnl:,.2f} ({pct_nav:+.2f}% NAV)")
+
+
+def load_vix_context(as_of: datetime.date) -> dict | None:
+    end = pd.Timestamp(as_of) + pd.Timedelta(days=1)
+    start = pd.Timestamp(as_of) - pd.Timedelta(days=370)
+
+    try:
+        history = yf.download("^VIX", start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"), progress=False, auto_adjust=False)
+    except Exception:
+        return None
+
+    if history is None or history.empty or "Close" not in history.columns:
+        return None
+
+    close = history["Close"].dropna()
+    if isinstance(close, pd.DataFrame):
+        if close.empty:
+            return None
+        close = close.iloc[:, 0].dropna()
+    if close.empty:
+        return None
+
+    latest_date = close.index[-1].date()
+    latest_value = float(close.iloc[-1])
+    trailing_year = close.tail(min(len(close), 252))
+    trailing_avg = float(trailing_year.mean())
+    abs_diff = latest_value - trailing_avg
+    pct_diff = (abs_diff / trailing_avg * 100.0) if trailing_avg else 0.0
+
+    return {
+        "latest_date": latest_date,
+        "latest_value": latest_value,
+        "trailing_avg": trailing_avg,
+        "abs_diff": abs_diff,
+        "pct_diff": pct_diff,
+        "points_above_avg": abs_diff,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Portfolio summary plus approximate option risk and stress report.")
     parser.add_argument("--file", default=None, help="Path to holdings CSV (default: my_holdings.csv next to script)")
@@ -213,6 +273,7 @@ def main():
     options = build_option_risk_frame(df, args.r)
     call_spreads = summarize_call_debit_spreads(options) if not options.empty else pd.DataFrame()
     uncovered_puts = summarize_uncovered_short_puts(options) if not options.empty else pd.DataFrame()
+    vix_context = load_vix_context(as_of)
 
     nav = df["Market Value Numeric"].sum()
     long_mv = df.loc[df["Market Value Numeric"] > 0, "Market Value Numeric"].sum()
@@ -242,6 +303,17 @@ def main():
     for asset_type, value in asset_mix.items():
         label = asset_type if str(asset_type).strip() else "Unknown"
         print(f"{label}: ${value:,.2f}")
+
+    print_section("VIX Context")
+    if vix_context is None:
+        print("VIX history unavailable.")
+    else:
+        print(f"Latest available VIX close: {vix_context['latest_value']:.2f} on {vix_context['latest_date']}")
+        print(f"Trailing 1-year average VIX close: {vix_context['trailing_avg']:.2f}")
+        print(
+            f"Above/below 1-year average: {vix_context['abs_diff']:+.2f} pts "
+            f"({vix_context['pct_diff']:+.2f}%)"
+        )
 
     print_section("Net Delta Exposure By Underlying")
     if options.empty:
@@ -284,9 +356,10 @@ def main():
         print(f"Net Delta Dollars: ${options['Delta Dollars'].sum():,.2f}")
         print(f"Net Gamma Dollars (1% move): ${options['Gamma Dollars 1%'].sum():,.2f}")
         print(f"Net Vega Dollars (per 1 vol point): ${options['Vega Dollars 1 Vol'].sum():,.2f}")
+        print(f"Net Theta Dollars (per day): ${options['Theta Dollars 1 Day'].sum():,.2f}")
 
         by_underlying = (
-            options.groupby("Underlying")[["Delta Dollars", "Gamma Dollars 1%","Vega Dollars 1 Vol"]]
+            options.groupby("Underlying")[["Delta Dollars", "Gamma Dollars 1%","Vega Dollars 1 Vol", "Theta Dollars 1 Day"]]
             .sum()
             .sort_values(by="Delta Dollars", key=lambda s: s.abs(), ascending=False)
             .head(15)
@@ -295,26 +368,48 @@ def main():
             print(
                 f"{underlying}: delta ${row['Delta Dollars']:,.2f} | "
                 f"gamma1% ${row['Gamma Dollars 1%']:,.2f} | "
-                f"vega ${row['Vega Dollars 1 Vol']:,.2f}"
+                f"vega ${row['Vega Dollars 1 Vol']:,.2f} | "
+                f"theta/day ${row['Theta Dollars 1 Day']:,.2f}"
             )
 
-    print_section("Stress Scenarios")
+    print_section("IV-Only Shock Ladder")
+    if options.empty:
+        print("No active option positions found.")
+    else:
+        for vol_points in (-20, -10, -5, 5, 10, 20):
+            pnl = options["Vega Dollars 1 Vol"].sum() * vol_points
+            print_scenario_line(f"IV {vol_points:+} pts", pnl, nav)
+
+    print_section("Objective Attribution")
+    if options.empty:
+        print("No active option positions found.")
+    else:
+        spot_only_1pct = (options["Delta Dollars"] * 0.01 + options["Gamma Dollars 1%"]).sum()
+        iv_only_1pt = options["Vega Dollars 1 Vol"].sum()
+        theta_1day = options["Theta Dollars 1 Day"].sum()
+        explained_1day = spot_only_1pct + iv_only_1pt + theta_1day
+        print_scenario_line("Spot only (+1%)", spot_only_1pct, nav)
+        print_scenario_line("IV only (+1 vol pt)", iv_only_1pt, nav)
+        print_scenario_line("Theta only (1 day)", theta_1day, nav)
+        print_scenario_line("Explained P/L for +1% spot, +1 vol pt, +1 day", explained_1day, nav)
+
+    print_section("Combined Stress Scenarios")
     if options.empty:
         print("No active option positions found.")
     else:
         stress_rows = [
-            ("Underlying -5%, IV +10pts", -0.05, 0.10),
-            ("Underlying -10%, IV +20pts", -0.10, 0.20),
-            ("Underlying +5%, IV -10pts", 0.05, -0.10),
-            ("Underlying +10%, IV -20pts", 0.10, -0.20),
+            ("Underlying -5%, IV +10pts", -0.05, 10),
+            ("Underlying -10%, IV +20pts", -0.10, 20),
+            ("Underlying +5%, IV -10pts", 0.05, -10),
+            ("Underlying +10%, IV -20pts", 0.10, -20),
         ]
-        for label, spot_move, vol_move in stress_rows:
+        for label, spot_move, vol_points in stress_rows:
             pnl = (
                 options["Delta Dollars"] * spot_move
                 + options["Gamma Dollars 1%"] * ((spot_move / 0.01) ** 2)
-                + options["Vega Dollars 1 Vol"] * (vol_move * 100.0)
+                + options["Vega Dollars 1 Vol"] * vol_points
             ).sum()
-            print(f"{label}: ${pnl:,.2f}")
+            print_scenario_line(label, pnl, nav)
 
 
 if __name__ == "__main__":
