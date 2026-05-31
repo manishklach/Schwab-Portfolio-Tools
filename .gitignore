@@ -1,6 +1,7 @@
 # Privacy / local data
 my_holdings.csv
 *.csv
+*.xls
 *.xlsx
 __pycache__/
 *.pyc

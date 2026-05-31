@@ -246,6 +246,28 @@ def main():
     for _, row in top_theta.iterrows():
         print(f"  {row['Symbol']:<35} {row['Opt Type']:<6} {row['Qty']:<8.0f} {row['Strike Price']:<8.2f} {row['Expiration']:<12} ${row['Theta $/day']:<8,.2f}")
 
+    # === Short put breakdown ===
+    short_puts = greeks[(greeks["Opt Type"] == "P") & (greeks["Qty"] < 0)]
+    if not short_puts.empty:
+        sp_actual = short_puts["Day Change Numeric"].sum()
+        sp_delta = (short_puts["Delta $"] * short_puts["Stock Chg %"].fillna(0.0)).sum()
+        sp_theta = short_puts["Theta $/day"].sum()
+        sp_gamma = (short_puts["Gamma $/1%"] * (short_puts["Stock Chg %"].fillna(0.0) / 0.01) ** 2).sum()
+        sp_vega = short_puts["Vega $/1vol"].sum() * args.vol_change
+        sp_expected = sp_delta + sp_gamma + sp_vega + sp_theta
+        sp_unexplained = sp_actual - sp_expected
+
+        print(f"\n  Short Put Breakdown:")
+        print(f"    Actual DC:        ${sp_actual:>10,.2f}")
+        print(f"    Delta P&L:        ${sp_delta:>10,.2f}  (directional, already in total)")
+        print(f"    Gamma:            ${sp_gamma:>10,.2f}")
+        print(f"    Vega:             ${sp_vega:>10,.2f}  (at {args.vol_change:+.2f} vol pts)")
+        print(f"    Theta:            ${sp_theta:>10,.2f}/day  (positive = you earn)")
+        print(f"    Expected (sum):   ${sp_expected:>10,.2f}")
+        print(f"    Residual (noise): ${sp_unexplained:>10,.2f}")
+        print(f"    => All already included in portfolio totals above.")
+        print(f"    => No separate add-back needed.")
+
     print(f"\n{'='*60}")
     print(f"  BOTTOM LINE")
     print(f"{'='*60}")
