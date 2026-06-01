@@ -254,47 +254,64 @@ def find_bad_itm_upday_call_spreads(options, quotes):
         if pd.isna(last) or pd.isna(prev) or pd.isna(stock_chg) or stock_chg <= 0:
             continue
 
-        longs = g[g["quantity"] > 0].sort_values("strike").copy()
-        shorts = g[g["quantity"] < 0].sort_values("strike").copy()
+        longs = [
+            {
+                "strike": float(row["strike"]),
+                "remaining_qty": int(abs(row["quantity"])),
+                "original_qty": int(abs(row["quantity"])),
+                "day_pl": float(row["day_pl"]),
+            }
+            for _, row in g[g["quantity"] > 0].sort_values("strike").iterrows()
+        ]
+        shorts = [
+            {
+                "strike": float(row["strike"]),
+                "remaining_qty": int(abs(row["quantity"])),
+                "original_qty": int(abs(row["quantity"])),
+                "day_pl": float(row["day_pl"]),
+            }
+            for _, row in g[g["quantity"] < 0].sort_values("strike").iterrows()
+        ]
 
-        # Pair each long with nearest higher short of same/closest qty.
-        for _, long_row in longs.iterrows():
-            lower = float(long_row["strike"])
-            long_qty = int(abs(long_row["quantity"]))
+        # Pair each short with the nearest lower long, consuming quantities as they are matched.
+        for short_leg in shorts:
+            upper = short_leg["strike"]
+            remaining_short = short_leg["remaining_qty"]
+            candidates = [leg for leg in longs if leg["remaining_qty"] > 0 and leg["strike"] < upper]
+            candidates.sort(key=lambda leg: leg["strike"], reverse=True)
 
-            candidates = shorts[shorts["strike"] > lower].copy()
-            if candidates.empty:
-                continue
-            candidates["qty_diff"] = (candidates["quantity"].abs() - long_qty).abs()
-            candidates["strike_gap"] = candidates["strike"] - lower
-            candidates = candidates.sort_values(["qty_diff", "strike_gap"])
+            for long_leg in candidates:
+                if remaining_short <= 0:
+                    break
 
-            short_row = candidates.iloc[0]
-            upper = float(short_row["strike"])
-            contracts = min(long_qty, int(abs(short_row["quantity"])))
+                contracts = min(long_leg["remaining_qty"], remaining_short)
+                if contracts <= 0 or last <= upper:
+                    continue
 
-            if contracts <= 0 or last <= upper:
-                continue
+                lower = long_leg["strike"]
+                long_day_pl = long_leg["day_pl"] * contracts / long_leg["original_qty"]
+                short_day_pl = short_leg["day_pl"] * contracts / short_leg["original_qty"]
+                actual = long_day_pl + short_day_pl
 
-            actual = float(long_row["day_pl"]) + float(short_row["day_pl"])
-            if actual >= 0:
-                continue
+                if actual < 0:
+                    expected = call_spread_intrinsic(last, lower, upper, contracts) - call_spread_intrinsic(prev, lower, upper, contracts)
+                    diff = expected - actual
 
-            expected = call_spread_intrinsic(last, lower, upper, contracts) - call_spread_intrinsic(prev, lower, upper, contracts)
-            diff = expected - actual
+                    rows.append({
+                        "ticker": ticker,
+                        "expiration": exp,
+                        "spread": f"{lower:g}/{upper:g} C",
+                        "contracts": contracts,
+                        "stock_change": stock_chg,
+                        "long_day_pl": long_day_pl,
+                        "short_day_pl": short_day_pl,
+                        "schwab_net_day_pl": actual,
+                        "intrinsic_expected_day_pl": expected,
+                        "diff_to_add_back": diff,
+                    })
 
-            rows.append({
-                "ticker": ticker,
-                "expiration": exp,
-                "spread": f"{lower:g}/{upper:g} C",
-                "contracts": contracts,
-                "stock_change": stock_chg,
-                "long_day_pl": float(long_row["day_pl"]),
-                "short_day_pl": float(short_row["day_pl"]),
-                "schwab_net_day_pl": actual,
-                "intrinsic_expected_day_pl": expected,
-                "diff_to_add_back": diff,
-            })
+                long_leg["remaining_qty"] -= contracts
+                remaining_short -= contracts
 
     out = pd.DataFrame(rows)
     if not out.empty:
