@@ -141,6 +141,11 @@ def main():
     parser.add_argument("--file", default=None, help="Path to holdings CSV (default: my_holdings.csv)")
     parser.add_argument("--as-of", default=None, help="Valuation date YYYY-MM-DD (default: today)")
     parser.add_argument("--ticker", default=None, help="Filter to a specific ticker (e.g. MU)")
+    parser.add_argument(
+        "--max",
+        action="store_true",
+        help="Show theoretical max spread value total, optionally filtered by --ticker.",
+    )
     args = parser.parse_args()
 
     as_of = datetime.strptime(args.as_of, "%Y-%m-%d").date() if args.as_of else datetime.now().date()
@@ -160,10 +165,31 @@ def main():
         return
 
     df_spreads = pd.DataFrame(spreads)
+    df_spreads["Max Spread Value"] = df_spreads["Width"] * df_spreads["Long Ctr"] * 100.0
 
     if args.ticker:
         args.ticker = args.ticker.strip().upper()
         df_spreads = df_spreads[df_spreads["Underlying"] == args.ticker]
+        if df_spreads.empty:
+            print(f"No bull call spreads identified for {args.ticker}.")
+            return
+
+    if args.max:
+        total_max_value = df_spreads["Max Spread Value"].sum()
+        label = f" for {args.ticker}" if args.ticker else ""
+        print("Bull Call Spread Max Values:")
+        print(f"{'Ticker':<8} {'Expiry':<12} {'Spread':<12} {'Ctr':<10} {'Max Value':<12}")
+        print("-" * 60)
+        for _, row in df_spreads.iterrows():
+            spread = f"{row['Long Strike']:.0f}/{row['Short Strike']:.0f}"
+            ctr = f"{row['Long Ctr']:.0f}/{abs(row['Short Ctr']):.0f}"
+            print(
+                f"{row['Underlying']:<8} {row['Expiration']:<12} {spread:<12} {ctr:<10} "
+                f"${row['Max Spread Value']:<11,.2f}"
+            )
+        print()
+        print(f"Total Max Value{label}: ${total_max_value:,.2f}")
+        return
 
     tickers = df_spreads["Underlying"].unique()
     stock_prices = fetch_stock_prices(tickers)
