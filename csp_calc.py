@@ -2,12 +2,16 @@
 
 import argparse
 import random
-import urllib.request
 
 import pandas as pd
 from openpyxl import load_workbook
 
 from portfolio_core import active_option_positions, clean_numeric, default_csv_path, load_schwab_holdings
+
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
 
 
 FUNNY_STARTUP_MESSAGES = [
@@ -26,32 +30,29 @@ def fetch_current_stock_prices(tickers):
     unique_tickers = sorted({str(ticker).strip().upper() for ticker in tickers if str(ticker).strip()})
     if not unique_tickers:
         return {}
+    if yf is None:
+        raise RuntimeError('yfinance not installed. Run: pip install yfinance')
 
     prices = {}
     for ticker in unique_tickers:
-        url = f'https://stooq.com/q/l/?s={ticker.lower()}.us&i=d'
-        request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                rows = response.read().decode('utf-8').strip().splitlines()
+            stock = yf.Ticker(ticker)
+            fast = {}
+            try:
+                fast = dict(stock.fast_info)
+            except Exception:
+                pass
+
+            last_price = fast.get('last_price')
+            if last_price is not None and not pd.isna(last_price):
+                prices[ticker] = float(last_price)
+                continue
+
+            history = stock.history(period='5d', interval='1d', auto_adjust=False)
+            if history.empty:
+                continue
+            prices[ticker] = float(history['Close'].iloc[-1])
         except Exception:
-            continue
-
-        if not rows:
-            continue
-
-        values = rows[0].split(',')
-        if len(values) < 7:
-            continue
-
-        close_value = values[6].strip()
-        if close_value in {'', 'N/D'}:
-            continue
-
-        try:
-            prices[ticker] = float(close_value)
-        except ValueError:
             continue
     return prices
 
