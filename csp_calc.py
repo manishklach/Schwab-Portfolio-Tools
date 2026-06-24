@@ -132,6 +132,52 @@ def fetch_current_stock_prices(tickers):
     return prices
 
 
+def fetch_stock_day_changes(tickers):
+    unique_tickers = sorted({str(ticker).strip().upper() for ticker in tickers if str(ticker).strip()})
+    if not unique_tickers:
+        return {}
+    if yf is None:
+        raise RuntimeError('yfinance not installed. Run: pip install yfinance')
+
+    changes = {}
+    for ticker in unique_tickers:
+        try:
+            stock = yf.Ticker(ticker)
+            fast = {}
+            try:
+                fast = dict(stock.fast_info)
+            except Exception:
+                pass
+
+            last_price = fast.get('last_price')
+            if last_price is None or pd.isna(last_price):
+                last_price = fast.get('lastPrice')
+
+            previous_close = fast.get('regularMarketPreviousClose')
+            if previous_close is None or pd.isna(previous_close):
+                previous_close = fast.get('previous_close')
+            if previous_close is None or pd.isna(previous_close):
+                previous_close = fast.get('previousClose')
+
+            if (
+                last_price is None or pd.isna(last_price)
+                or previous_close is None or pd.isna(previous_close)
+            ):
+                history = stock.history(period='5d', interval='1d', auto_adjust=False)
+                if history.empty or 'Close' not in history:
+                    continue
+                closes = history['Close'].dropna()
+                if len(closes) < 2:
+                    continue
+                previous_close = float(closes.iloc[-2])
+                last_price = float(closes.iloc[-1])
+
+            changes[ticker] = float(last_price) - float(previous_close)
+        except Exception:
+            continue
+    return changes
+
+
 def autosize_excel_columns(output_path):
     workbook = load_workbook(output_path)
     worksheet = workbook.active
@@ -150,7 +196,9 @@ def format_display_table(df_out):
             'Contracts Sold': 'Qty',
             'Strike Price': 'Strike',
             'Current Stock Price': 'Stock Px',
+            'Stock Day Change Numeric': 'Stock Day Chg',
             'Delta Numeric': 'Delta',
+            'Est Position Day Change': 'Est Pos Day Chg',
             'Moneyness Status': 'Status',
             'Current Mkt Value': 'Mkt Value',
             'Cash Secured ($)': 'Cash Sec',
@@ -160,7 +208,7 @@ def format_display_table(df_out):
     return display_df.to_string(index=False)
 
 
-def find_uncovered_short_puts(df_puts, stock_prices):
+def find_uncovered_short_puts(df_puts, stock_prices, stock_day_changes):
     uncovered_rows = []
     delta_cache = {}
 
@@ -197,6 +245,8 @@ def find_uncovered_short_puts(df_puts, stock_prices):
                 uncovered['Contracts Sold'] = remaining_short
                 current_stock_price = stock_prices.get(str(short_row['Ticker']).strip().upper())
                 uncovered['Current Stock Price'] = current_stock_price
+                stock_day_change = stock_day_changes.get(str(short_row['Ticker']).strip().upper(), pd.NA)
+                uncovered['Stock Day Change Numeric'] = stock_day_change
                 strike = float(short_row['Strike Price'])
                 expiration = short_row['Expiration']
                 delta_key = (str(short_row['Ticker']).strip().upper(), expiration, strike)
@@ -212,6 +262,12 @@ def find_uncovered_short_puts(df_puts, stock_prices):
                             short_row.get('Delta Numeric', pd.NA),
                         )
                     uncovered['Delta Numeric'] = delta_cache[delta_key]
+                if pd.isna(uncovered['Delta Numeric']) or pd.isna(stock_day_change):
+                    uncovered['Est Position Day Change'] = pd.NA
+                else:
+                    uncovered['Est Position Day Change'] = (
+                        abs(float(uncovered['Delta Numeric'])) * float(stock_day_change) * remaining_short * 100.0
+                    )
                 if current_stock_price is None:
                     uncovered['Moneyness Status'] = ''
                 elif short_strike <= current_stock_price:
@@ -223,7 +279,16 @@ def find_uncovered_short_puts(df_puts, stock_prices):
                 uncovered_rows.append(uncovered)
 
     if not uncovered_rows:
-        columns = list(df_puts.columns) + ['Contracts Sold', 'Current Stock Price', 'Moneyness Status', 'Current Mkt Value', 'Cash Secured ($)']
+        columns = list(df_puts.columns) + [
+            'Contracts Sold',
+            'Current Stock Price',
+            'Stock Day Change Numeric',
+            'Delta Numeric',
+            'Est Position Day Change',
+            'Moneyness Status',
+            'Current Mkt Value',
+            'Cash Secured ($)',
+        ]
         return pd.DataFrame(columns=columns)
 
     return pd.DataFrame(uncovered_rows)
@@ -233,6 +298,7 @@ def main():
     parser = argparse.ArgumentParser(description='Find naked short puts and estimate cash-secured requirement')
     parser.add_argument('--file', default=None, help='Path to holdings CSV (default: my_holdings.csv next to script)')
     parser.add_argument('--output', default=None, help='Output Excel path (default: naked_short_puts.xlsx next to script)')
+    parser.add_argument('--ticker', default=None, help='Filter to a specific ticker (e.g. MU)')
     args = parser.parse_args()
 
     csv_path = default_csv_path(args.file, __file__)
@@ -248,14 +314,30 @@ def main():
     df_options = active_option_positions(df)
     df_options['Ticker'] = df_options['Underlying']
     df_puts = df_options[df_options['Opt Type'] == 'P'].copy()
+    if args.ticker:
+        ticker_filter = args.ticker.strip().upper()
+        df_puts = df_puts[df_puts['Ticker'].astype(str).str.upper() == ticker_filter].copy()
     if 'Delta' in df_puts.columns:
         df_puts['Delta Numeric'] = df_puts['Delta'].apply(clean_numeric)
     else:
         df_puts['Delta Numeric'] = pd.NA
     stock_prices = fetch_current_stock_prices(df_puts['Ticker'])
-    df_naked_short_puts = find_uncovered_short_puts(df_puts, stock_prices)
+    stock_day_changes = fetch_stock_day_changes(df_puts['Ticker'])
+    df_naked_short_puts = find_uncovered_short_puts(df_puts, stock_prices, stock_day_changes)
 
-    output_cols = ['Ticker', 'Symbol', 'Contracts Sold', 'Strike Price', 'Current Stock Price', 'Delta Numeric', 'Moneyness Status', 'Current Mkt Value', 'Cash Secured ($)']
+    output_cols = [
+        'Ticker',
+        'Symbol',
+        'Contracts Sold',
+        'Strike Price',
+        'Current Stock Price',
+        'Stock Day Change Numeric',
+        'Delta Numeric',
+        'Est Position Day Change',
+        'Moneyness Status',
+        'Current Mkt Value',
+        'Cash Secured ($)',
+    ]
     df_out = df_naked_short_puts[output_cols].copy()
 
     total_row = pd.DataFrame([
@@ -265,7 +347,9 @@ def main():
             'Contracts Sold': df_out['Contracts Sold'].sum(),
             'Strike Price': 0.0,
             'Current Stock Price': 0.0,
+            'Stock Day Change Numeric': 0.0,
             'Delta Numeric': 0.0,
+            'Est Position Day Change': pd.to_numeric(df_out['Est Position Day Change'], errors='coerce').fillna(0).sum(),
             'Moneyness Status': '',
             'Current Mkt Value': df_out['Current Mkt Value'].sum(),
             'Cash Secured ($)': df_out['Cash Secured ($)'].sum(),
