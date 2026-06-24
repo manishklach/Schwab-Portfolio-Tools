@@ -346,6 +346,41 @@ def bs_put_delta(S, K, T, r, sigma, q=0.0):
     return -math.exp(-q * T) * norm_cdf(-d1)
 
 
+def bs_option_price(S, K, T, r, sigma, opt_type, q=0.0):
+    if any(pd.isna(v) for v in [S, K, T, r, sigma, q]) or S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        intrinsic = max(S - K, 0.0) if opt_type == "C" else max(K - S, 0.0)
+        return intrinsic
+    sqrt_t = math.sqrt(T)
+    d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * sqrt_t)
+    d2 = d1 - sigma * sqrt_t
+    discounted_spot = S * math.exp(-q * T)
+    discounted_strike = K * math.exp(-r * T)
+    if opt_type == "C":
+        return discounted_spot * norm_cdf(d1) - discounted_strike * norm_cdf(d2)
+    return discounted_strike * norm_cdf(-d2) - discounted_spot * norm_cdf(-d1)
+
+
+def implied_volatility_from_price(target_price, S, K, T, r, opt_type, q=0.0):
+    if any(pd.isna(v) for v in [target_price, S, K, T, r, q]) or target_price <= 0 or S <= 0 or K <= 0 or T <= 0:
+        return np.nan
+    low = 1e-4
+    high = 5.0
+    low_price = bs_option_price(S, K, T, r, low, opt_type, q)
+    high_price = bs_option_price(S, K, T, r, high, opt_type, q)
+    if target_price < low_price - 1e-6 or target_price > high_price + 1e-6:
+        return np.nan
+    for _ in range(80):
+        mid = (low + high) / 2.0
+        mid_price = bs_option_price(S, K, T, r, mid, opt_type, q)
+        if abs(mid_price - target_price) < 1e-5:
+            return mid
+        if mid_price < target_price:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2.0
+
+
 def normalize_put_delta(d):
     if pd.isna(d):
         return np.nan
@@ -418,6 +453,22 @@ def check_otm_short_puts(options, quotes, risk_free_rate=0.045, dividend_yield=0
         if prefer_csv_delta and not pd.isna(row.get("csv_delta", np.nan)):
             delta = normalize_put_delta(row["csv_delta"])
             delta_source = "csv/broker_delta"
+
+        if pd.isna(delta):
+            option_mark = float(row.get("price", np.nan))
+            T = year_frac(row["expiration"])
+            mark_iv = implied_volatility_from_price(
+                option_mark,
+                last,
+                strike,
+                T,
+                risk_free_rate,
+                "P",
+                dividend_yield,
+            )
+            if not pd.isna(mark_iv):
+                delta = bs_put_delta(last, strike, T, risk_free_rate, mark_iv, dividend_yield)
+                delta_source = "mark_iv_black_scholes"
 
         if pd.isna(delta):
             key = (ticker, row["expiration"], strike)
